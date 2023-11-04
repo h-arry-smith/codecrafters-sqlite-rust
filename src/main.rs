@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::fs::File;
-use std::io::prelude::*;
+use std::io::{prelude::*, SeekFrom};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
@@ -27,15 +27,30 @@ fn main() -> Result<()> {
 }
 
 fn handle_dot_command(command: &str, args: &[String]) -> Result<()> {
+    let path = PathBuf::from(&args[0]);
+    let mut file = File::open(path).context("Failed to open database file")?;
+    let header = DbHeader::parse(&mut file);
+    let master_page = DbPage::parse(&mut file);
+
     match command {
         "dbinfo" => {
-            let path = PathBuf::from(&args[0]);
-            let mut file = File::open(path).context("Failed to open database file")?;
-            let header = DbHeader::parse(&mut file);
-            let first_page = DbPage::parse(&mut file);
-
+            eprintln!("version: {:x}", header.sqlite_version_number);
             println!("database page size: {}", header.page_size);
-            println!("number of tables: {}", first_page.cell_count)
+
+            println!("number of tables: {}", master_page.header.cell_count);
+        }
+        "tables" => {
+            println!("number of tables: {}", master_page.header.cell_count);
+
+            let table_names = master_page.records.iter().map(|record| {
+                let table = Table::parse(record);
+                table.name
+            });
+
+            // join all table names with a space in between
+            let table_names = table_names.collect::<Vec<_>>().join(" ");
+
+            println!("{}", table_names);
         }
         _ => bail!("Unrecognized dot command: {}", command),
     }
@@ -43,10 +58,17 @@ fn handle_dot_command(command: &str, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+// TODO: This could be macro'd
 trait ByteReader {
     fn read_u8(&mut self) -> u8;
     fn read_u16(&mut self) -> u16;
     fn read_u32(&mut self) -> u32;
+    fn read_u64(&mut self) -> u64;
+    fn read_i8(&mut self) -> i8;
+    fn read_i16(&mut self) -> i16;
+    fn read_i32(&mut self) -> i32;
+    fn read_i64(&mut self) -> i64;
+    fn read_varint(&mut self) -> (u64, usize);
     fn skip(&mut self, n: usize);
 }
 
@@ -54,19 +76,82 @@ impl<R: Read> ByteReader for R {
     fn read_u8(&mut self) -> u8 {
         let mut buf = [0; 1];
         self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
         u8::from_be_bytes(buf)
     }
 
     fn read_u16(&mut self) -> u16 {
         let mut buf = [0; 2];
         self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
         u16::from_be_bytes(buf)
     }
 
     fn read_u32(&mut self) -> u32 {
         let mut buf = [0; 4];
         self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
         u32::from_be_bytes(buf)
+    }
+
+    fn read_u64(&mut self) -> u64 {
+        let mut buf = [0; 8];
+        self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
+        u64::from_be_bytes(buf)
+    }
+
+    fn read_i8(&mut self) -> i8 {
+        let mut buf = [0; 1];
+        self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
+        i8::from_be_bytes(buf)
+    }
+
+    fn read_i16(&mut self) -> i16 {
+        let mut buf = [0; 2];
+        self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
+        i16::from_be_bytes(buf)
+    }
+
+    fn read_i32(&mut self) -> i32 {
+        let mut buf = [0; 4];
+        self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
+        i32::from_be_bytes(buf)
+    }
+
+    fn read_i64(&mut self) -> i64 {
+        let mut buf = [0; 8];
+        self.read_exact(&mut buf).unwrap();
+        eprintln!("{:x?}", buf);
+        i64::from_be_bytes(buf)
+    }
+
+    fn read_varint(&mut self) -> (u64, usize) {
+        let mut n = 0;
+        let mut shift = 0;
+        let mut size = 0;
+
+        loop {
+            let mut buf = [0; 1];
+            self.read_exact(&mut buf).unwrap();
+            size += 1;
+
+            let byte = buf[0] as u64;
+            if byte & 0x80 == 0 {
+                n <<= shift;
+                n |= byte;
+                break;
+            } else {
+                n <<= shift;
+                n |= byte & 0x7f;
+                shift += 7;
+            }
+        }
+
+        (n, size)
     }
 
     fn skip(&mut self, n: usize) {
@@ -322,16 +407,17 @@ impl From<u8> for PageType {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-struct DbPage {
+struct DbPageHeader {
     page_type: PageType,
     first_freeblock: u16,
     cell_count: u16,
     cell_content_area_offset: u16,
     fragmented_free_bytes: u8,
     rightmost_pointer: Option<u32>,
+    cells: Vec<u16>,
 }
 
-impl DbPage {
+impl DbPageHeader {
     fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
         // The one-byte flag at offset 0 indicating the b-tree page type.
         //      0x02 interior index b-tree page.
@@ -340,21 +426,26 @@ impl DbPage {
         //      0x0d leaf table b-tree page.
         // Any other value for the b-tree page type is an error.
         let flag = reader.read_u8();
+        eprintln!("flag: {:x}", flag);
         let page_type = flag.into();
 
         // The two-byte integer at offset 1 gives the start of the first freeblock on the page, or
         // is zero if there are no freeblocks.
         let first_freeblock = reader.read_u16();
+        eprintln!("first_freeblock: {:x}", first_freeblock);
 
         // The two-byte integer at offset 3 gives the number of cells on the page.
         let cell_count = reader.read_u16();
+        eprintln!("cell_count: {:x}", cell_count);
 
         // The two-byte integer at offset 5 gives the start of the cell content area within the page.
         let cell_content_area_offset = reader.read_u16();
+        eprintln!("cell_content_area_offset: {:x}", cell_content_area_offset);
 
         // The one-byte integer at offset 7 gives the number of fragmented free bytes within the cell
         // content area at the end of the page.
         let fragmented_free_bytes = reader.read_u8();
+        eprintln!("fragmented_free_bytes: {:x}", fragmented_free_bytes);
 
         // The four-byte integer at offset 8 gives the page number of the right-most page in the tree
         // that is the parent of this page. If this is a root page, then the value is zero.
@@ -363,6 +454,14 @@ impl DbPage {
             PageType::LeafIndex | PageType::LeafTable => None,
         };
 
+        // The cell content area consists of a sequence of cells. Each cell has a 2-byte integer
+        // giving the size of the cell, followed by the cell content itself. The cell content format
+        // depends on the b-tree page type.
+        let mut cells = Vec::new();
+        for _ in 0..cell_count {
+            cells.push(reader.read_u16());
+        }
+
         Self {
             page_type,
             first_freeblock,
@@ -370,6 +469,222 @@ impl DbPage {
             cell_content_area_offset,
             fragmented_free_bytes,
             rightmost_pointer,
+            cells,
+        }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct DbPage<R: Record> {
+    header: DbPageHeader,
+    records: Vec<R>,
+}
+
+impl DbPage<TableLeafRecord> {
+    fn parse<B: Read + ByteReader + Seek>(reader: &mut B) -> Self {
+        let header = DbPageHeader::parse(reader);
+        let mut records = vec![];
+
+        eprintln!("header: {:#x?}", header);
+
+        for cell in &header.cells {
+            reader.seek(SeekFrom::Start(*cell as u64)).unwrap();
+            eprintln!("cell: {:x}", cell);
+            let record = TableLeafRecord::parse(reader);
+            records.push(record);
+        }
+
+        Self { header, records }
+    }
+}
+
+trait Record {
+    fn parse<R: Read + ByteReader>(reader: &mut R) -> Self;
+}
+
+#[derive(Debug)]
+enum DataType {
+    Null,
+    Int8,
+    Int16,
+    Int24,
+    Int32,
+    Int48,
+    Int64,
+    Float,
+    Zero,
+    One,
+    Blob(usize),
+    Text(usize),
+}
+
+impl DataType {
+    // TODO: account for differing specs of string encoding
+    fn parse_string<R: Read + ByteReader>(&self, reader: &mut R) -> String {
+        match self {
+            DataType::Blob(size) => {
+                let mut buf = vec![0; *size];
+                reader.read_exact(&mut buf).unwrap();
+                String::from_utf8(buf).unwrap()
+            }
+            DataType::Text(size) => {
+                let mut buf = vec![0; *size];
+                reader.read_exact(&mut buf).unwrap();
+                String::from_utf8(buf).unwrap()
+            }
+            _ => panic!("Invalid data type for string: {:?}", self),
+        }
+    }
+
+    fn parse_int<R: Read + ByteReader>(&self, reader: &mut R) -> i64 {
+        match self {
+            DataType::Int8 => reader.read_i8() as i64,
+            DataType::Int16 => reader.read_i16() as i64,
+            DataType::Int24 => {
+                let mut buf = [0; 3];
+                reader.read_exact(&mut buf).unwrap();
+                i32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as i64
+            }
+            DataType::Int32 => reader.read_i32() as i64,
+            DataType::Int48 => {
+                let mut buf = [0; 6];
+                reader.read_exact(&mut buf).unwrap();
+                i64::from_be_bytes([0, 0, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]])
+            }
+            DataType::Int64 => reader.read_i64(),
+            _ => panic!("Invalid data type for int: {:?}", self),
+        }
+    }
+}
+
+impl From<u64> for DataType {
+    fn from(byte: u64) -> Self {
+        match byte {
+            0x00 => DataType::Null,
+            0x01 => DataType::Int8,
+            0x02 => DataType::Int16,
+            0x03 => DataType::Int24,
+            0x04 => DataType::Int32,
+            0x05 => DataType::Int48,
+            0x06 => DataType::Int64,
+            0x07 => DataType::Float,
+            0x08 => DataType::Zero,
+            0x09 => DataType::One,
+            byte => {
+                if byte >= 12 && byte % 2 == 0 {
+                    DataType::Blob(((byte - 12) / 2) as usize)
+                } else if byte >= 13 && byte % 2 == 1 {
+                    DataType::Text(((byte - 13) / 2) as usize)
+                } else {
+                    panic!("Invalid data type byte: {}", byte);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct TableLeafRecord {
+    header: TableLeafRecordHeader,
+    data_specification: DataSpecification,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct DataSpecification {
+    size: usize,
+    types: Vec<DataType>,
+}
+
+impl DataSpecification {
+    fn parse<R: Read + ByteReader>(reader: &mut R, size: usize) -> Self {
+        let mut types = vec![];
+        let mut payload_reader = vec![0; size];
+        reader.read_exact(&mut payload_reader).unwrap();
+        let mut payload_reader = payload_reader.as_slice();
+
+        while !payload_reader.is_empty() {
+            let (data_type, data_type_size) = payload_reader.read_varint();
+            eprintln!("data_type: {:x}", data_type);
+            eprintln!("data_type_size: {:x}", data_type_size);
+            types.push(data_type.into());
+        }
+
+        Self {
+            size: size - 1,
+            types,
+        }
+    }
+}
+
+impl Record for TableLeafRecord {
+    fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let (size, _) = reader.read_varint();
+        eprintln!("size: {:x}", size);
+        let (row_id, _) = reader.read_varint();
+        eprintln!("row_id: {:x}", row_id);
+        let header = TableLeafRecordHeader { size, row_id };
+        eprintln!("header: {:#?}", header);
+        let mut payload = vec![0; size as usize];
+        reader.read_exact(&mut payload).unwrap();
+
+        let mut payload = payload.as_slice();
+        let (column_header_size, column_header_size_count) = payload.read_varint();
+        eprintln!("column_header_size: {:x}", column_header_size);
+        eprintln!("column_header_size_count: {:x}", column_header_size_count);
+
+        let data_specification = DataSpecification::parse(
+            &mut payload,
+            column_header_size as usize - column_header_size_count,
+        );
+
+        Self {
+            header,
+            data_specification,
+            payload: payload.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct TableLeafRecordHeader {
+    size: u64,
+    row_id: u64,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct Table {
+    name: String,
+    root_page: u32,
+    sql: String,
+}
+
+impl Table {
+    fn parse(record: &TableLeafRecord) -> Self {
+        let mut payload = record.payload.as_slice();
+        let mut type_iter = record.data_specification.types.iter();
+
+        let table_type = type_iter.next().unwrap().parse_string(&mut payload);
+        eprintln!("table_type: {}", table_type);
+        assert!(table_type == "table");
+        let name = type_iter.next().unwrap().parse_string(&mut payload);
+        eprintln!("name: {}", name);
+        let table_name = type_iter.next().unwrap().parse_string(&mut payload);
+        eprintln!("table_name: {}", table_name);
+        let root_page = type_iter.next().unwrap().parse_int(&mut payload);
+        eprintln!("root_page: {}", root_page);
+        let sql = type_iter.next().unwrap().parse_string(&mut payload);
+        eprintln!("sql: {}", sql);
+
+        Self {
+            name,
+            root_page: root_page as u32,
+            sql,
         }
     }
 }
