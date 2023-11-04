@@ -20,8 +20,42 @@ fn main() -> Result<()> {
 
     match first_char {
         '.' => handle_dot_command(&rest, &args[1..])?,
-        _ => bail!("Missing or invalid command passed: {}", command),
+        _ => run_sql_command(&args[1..])?,
     }
+
+    Ok(())
+}
+
+// TODO: Create a DB struct
+// TODO: Move loads of the functionality into it
+
+fn run_sql_command(args: &[String]) -> Result<()> {
+    let path = PathBuf::from(&args[0]);
+    let mut file = File::open(path).context("Failed to open database file")?;
+    let header = DbHeader::parse(&mut file);
+    let master_page = DbPage::parse(&mut file, 0);
+
+    let tables: Vec<Table> = master_page.records.iter().map(Table::parse).collect();
+
+    let target_table = args[1].split(' ').last().unwrap();
+    let target_table = tables
+        .iter()
+        .find(|table| table.name == target_table)
+        .unwrap();
+
+    dbg!(target_table);
+
+    let page_offset = (target_table.root_page as u64 - 1) * header.page_size as u64;
+    eprintln!("page_offset: {:x}", page_offset);
+    file.seek(SeekFrom::Start(page_offset)).unwrap();
+
+    let table_page: DbPage<TableLeafRecord> = DbPage::parse(&mut file, page_offset);
+
+    for record in &table_page.records {
+        eprintln!("record: {:#?}", record.data_specification);
+    }
+
+    println!("{}", table_page.records.len());
 
     Ok(())
 }
@@ -30,7 +64,7 @@ fn handle_dot_command(command: &str, args: &[String]) -> Result<()> {
     let path = PathBuf::from(&args[0]);
     let mut file = File::open(path).context("Failed to open database file")?;
     let header = DbHeader::parse(&mut file);
-    let master_page = DbPage::parse(&mut file);
+    let master_page = DbPage::parse(&mut file, 0);
 
     match command {
         "dbinfo" => {
@@ -481,17 +515,19 @@ struct DbPage<R: Record> {
     records: Vec<R>,
 }
 
-impl DbPage<TableLeafRecord> {
-    fn parse<B: Read + ByteReader + Seek>(reader: &mut B) -> Self {
+impl<R: Record> DbPage<R> {
+    fn parse<B: Read + ByteReader + Seek>(reader: &mut B, page_offset: u64) -> Self {
         let header = DbPageHeader::parse(reader);
         let mut records = vec![];
 
         eprintln!("header: {:#x?}", header);
 
         for cell in &header.cells {
-            reader.seek(SeekFrom::Start(*cell as u64)).unwrap();
+            reader
+                .seek(SeekFrom::Start(page_offset + *cell as u64))
+                .unwrap();
             eprintln!("cell: {:x}", cell);
-            let record = TableLeafRecord::parse(reader);
+            let record = R::parse(reader);
             records.push(record);
         }
 
