@@ -1,7 +1,13 @@
+use crate::sql_engine::SqlEngine;
 use anyhow::{bail, Context, Result};
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{prelude::*, SeekFrom};
 use std::path::PathBuf;
+
+mod lexer;
+mod parser;
+mod sql_engine;
 
 fn main() -> Result<()> {
     // Parse arguments
@@ -26,45 +32,72 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// TODO: Create a DB struct
-// TODO: Move loads of the functionality into it
+pub struct Db {
+    file: File,
+    header: DbHeader,
+    master_page: DbPage<TableLeafRecord>,
+}
+
+impl Db {
+    fn new(path: PathBuf) -> Self {
+        let mut file = File::open(path).unwrap();
+        let header = DbHeader::parse(&mut file);
+        let master_page = DbPage::parse_master(&mut file);
+
+        Self {
+            file,
+            header,
+            master_page,
+        }
+    }
+
+    fn run_sql_command(&mut self, command: &str) {
+        let sql_engine = SqlEngine::new();
+
+        // Codecrafters input doesn't include a semicolon, so lets add one.
+        if !command.ends_with(';') {
+            self.run_sql_command(&format!("{};", command));
+        } else {
+            sql_engine.execute(command, self);
+        }
+    }
+
+    fn get_table(&mut self, table_name: &str) -> Table {
+        dbg!(&self.master_page.records);
+        let table = self
+            .master_page
+            .records
+            .iter()
+            .find(|record| {
+                let table = dbg!(Table::parse(record));
+                table.name.to_ascii_lowercase() == table_name.to_ascii_lowercase()
+            })
+            .unwrap();
+
+        Table::parse(table)
+    }
+
+    fn load_table(&mut self, table: &Table) -> DbPage<TableLeafRecord> {
+        eprintln!("### TRYING TO LOAD TABLE {} ###", table.name);
+        let offset = dbg!((table.root_page as u64 - 1) * self.header.page_size as u64);
+        DbPage::parse(&mut self.file, offset)
+    }
+}
 
 fn run_sql_command(args: &[String]) -> Result<()> {
     let path = PathBuf::from(&args[0]);
-    let mut file = File::open(path).context("Failed to open database file")?;
-    let header = DbHeader::parse(&mut file);
-    let master_page = DbPage::parse(&mut file, 0);
-
-    let tables: Vec<Table> = master_page.records.iter().map(Table::parse).collect();
-
-    let target_table = args[1].split(' ').last().unwrap();
-    let target_table = tables
-        .iter()
-        .find(|table| table.name == target_table)
-        .unwrap();
-
-    dbg!(target_table);
-
-    let page_offset = (target_table.root_page as u64 - 1) * header.page_size as u64;
-    eprintln!("page_offset: {:x}", page_offset);
-    file.seek(SeekFrom::Start(page_offset)).unwrap();
-
-    let table_page: DbPage<TableLeafRecord> = DbPage::parse(&mut file, page_offset);
-
-    for record in &table_page.records {
-        eprintln!("record: {:#?}", record.data_specification);
-    }
-
-    println!("{}", table_page.records.len());
+    let mut db = Db::new(path);
+    db.run_sql_command(&args[1]);
 
     Ok(())
 }
 
+// TODO: USE DB HERE!
 fn handle_dot_command(command: &str, args: &[String]) -> Result<()> {
     let path = PathBuf::from(&args[0]);
     let mut file = File::open(path).context("Failed to open database file")?;
     let header = DbHeader::parse(&mut file);
-    let master_page = DbPage::parse(&mut file, 0);
+    let master_page = DbPage::parse_master(&mut file);
 
     match command {
         "dbinfo" => {
@@ -517,7 +550,8 @@ struct DbPage<R: Record> {
 
 impl<R: Record> DbPage<R> {
     fn parse<B: Read + ByteReader + Seek>(reader: &mut B, page_offset: u64) -> Self {
-        let header = DbPageHeader::parse(reader);
+        reader.seek(SeekFrom::Start(page_offset)).unwrap();
+        let header = dbg!(DbPageHeader::parse(reader));
         let mut records = vec![];
 
         eprintln!("header: {:#x?}", header);
@@ -526,6 +560,23 @@ impl<R: Record> DbPage<R> {
             reader
                 .seek(SeekFrom::Start(page_offset + *cell as u64))
                 .unwrap();
+            eprintln!("cell: {:x}", cell);
+            let record = R::parse(reader);
+            records.push(record);
+        }
+
+        Self { header, records }
+    }
+
+    fn parse_master<B: Read + ByteReader + Seek>(reader: &mut B) -> Self {
+        reader.seek(SeekFrom::Start(100)).unwrap();
+        let header = dbg!(DbPageHeader::parse(reader));
+        let mut records = vec![];
+
+        eprintln!("header: {:#x?}", header);
+
+        for cell in &header.cells {
+            reader.seek(SeekFrom::Start(*cell as u64)).unwrap();
             eprintln!("cell: {:x}", cell);
             let record = R::parse(reader);
             records.push(record);
@@ -555,7 +606,95 @@ enum DataType {
     Text(usize),
 }
 
+#[derive(Debug, Clone)]
+enum Value {
+    Int(i64),
+    Text(String),
+    Blob(Vec<u8>),
+    Null,
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Int(n) => write!(f, "{}", n),
+            Value::Text(s) => write!(f, "{}", s),
+            Value::Blob(b) => write!(f, "{:x?}", b),
+            Value::Null => write!(f, "NULL"),
+        }
+    }
+}
+
+impl TryInto<i64> for Value {
+    type Error = ();
+
+    fn try_into(self) -> Result<i64, Self::Error> {
+        match self {
+            Value::Int(n) => Ok(n),
+            _ => Err(()),
+        }
+    }
+}
+
+impl TryInto<String> for Value {
+    type Error = ();
+
+    fn try_into(self) -> Result<String, Self::Error> {
+        match self {
+            Value::Text(s) => Ok(s),
+            Value::Blob(b) => Ok(String::from_utf8(b).unwrap()),
+            _ => Err(()),
+        }
+    }
+}
+
+impl TryInto<u32> for Value {
+    type Error = ();
+
+    fn try_into(self) -> Result<u32, Self::Error> {
+        match self {
+            Value::Int(n) => Ok(n as u32),
+            _ => Err(()),
+        }
+    }
+}
+
 impl DataType {
+    pub fn parse(&self, reader: &mut &[u8]) -> Value {
+        match self {
+            DataType::Null => Value::Null,
+            DataType::Int8 => Value::Int(reader.read_i8() as i64),
+            DataType::Int16 => Value::Int(reader.read_i16() as i64),
+            DataType::Int24 => {
+                let mut buf = [0; 3];
+                reader.read_exact(&mut buf).unwrap();
+                Value::Int(i32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as i64)
+            }
+            DataType::Int32 => Value::Int(reader.read_i32() as i64),
+            DataType::Int48 => {
+                let mut buf = [0; 6];
+                reader.read_exact(&mut buf).unwrap();
+                Value::Int(i64::from_be_bytes([
+                    0, 0, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5],
+                ]))
+            }
+            DataType::Int64 => Value::Int(reader.read_i64()),
+            DataType::Float => Value::Int(reader.read_u64() as i64),
+            DataType::Zero => Value::Int(0),
+            DataType::One => Value::Int(1),
+            DataType::Blob(size) => {
+                let mut buf = vec![0; *size];
+                reader.read_exact(&mut buf).unwrap();
+                Value::Blob(buf)
+            }
+            DataType::Text(size) => {
+                let mut buf = vec![0; *size];
+                reader.read_exact(&mut buf).unwrap();
+                Value::Text(String::from_utf8(buf).unwrap())
+            }
+        }
+    }
+
     // TODO: account for differing specs of string encoding
     fn parse_string<R: Read + ByteReader>(&self, reader: &mut R) -> String {
         match self {
@@ -626,6 +765,7 @@ struct TableLeafRecord {
     header: TableLeafRecordHeader,
     data_specification: DataSpecification,
     payload: Vec<u8>,
+    values: Vec<Value>,
 }
 
 #[derive(Debug)]
@@ -648,6 +788,8 @@ impl DataSpecification {
             eprintln!("data_type_size: {:x}", data_type_size);
             types.push(data_type.into());
         }
+
+        dbg!(&types);
 
         Self {
             size: size - 1,
@@ -677,10 +819,17 @@ impl Record for TableLeafRecord {
             column_header_size as usize - column_header_size_count,
         );
 
+        let values = data_specification
+            .types
+            .iter()
+            .map(|data_type| data_type.parse(&mut payload))
+            .collect();
+
         Self {
             header,
             data_specification,
             payload: payload.to_vec(),
+            values,
         }
     }
 }
@@ -698,29 +847,62 @@ struct Table {
     name: String,
     root_page: u32,
     sql: String,
+    columns: Vec<String>,
 }
 
 impl Table {
     fn parse(record: &TableLeafRecord) -> Self {
-        let mut payload = record.payload.as_slice();
-        let mut type_iter = record.data_specification.types.iter();
-
-        let table_type = type_iter.next().unwrap().parse_string(&mut payload);
+        let table_type: String = record.values.get(0).unwrap().clone().try_into().unwrap();
         eprintln!("table_type: {}", table_type);
         assert!(table_type == "table");
-        let name = type_iter.next().unwrap().parse_string(&mut payload);
+        let name: String = record.values.get(1).unwrap().clone().try_into().unwrap();
         eprintln!("name: {}", name);
-        let table_name = type_iter.next().unwrap().parse_string(&mut payload);
+        let table_name: String = record.values.get(2).unwrap().clone().try_into().unwrap();
         eprintln!("table_name: {}", table_name);
-        let root_page = type_iter.next().unwrap().parse_int(&mut payload);
+        let root_page: u32 = record.values.get(3).unwrap().clone().try_into().unwrap();
         eprintln!("root_page: {}", root_page);
-        let sql = type_iter.next().unwrap().parse_string(&mut payload);
+        let sql: String = record.values.get(4).unwrap().clone().try_into().unwrap();
         eprintln!("sql: {}", sql);
+
+        let columns = Table::analyse_sql_for_column_order(&sql);
 
         Self {
             name,
-            root_page: root_page as u32,
+            root_page,
             sql,
+            columns,
         }
+    }
+
+    fn analyse_sql_for_column_order(sql: &str) -> Vec<String> {
+        let tokens = lexer::Lexer::new(sql.to_string()).lex();
+        let mut parser = parser::Parser::new(tokens);
+        let ast = parser.parse_create();
+
+        match ast {
+            parser::Ast::CreateTable {
+                name: _,
+                column_defs: columns,
+            } => columns
+                .iter()
+                .map(|col| match col {
+                    parser::Ast::ColumnDef {
+                        name,
+                        data_type: _,
+                        constraints: _,
+                    } => name,
+                    _ => panic!("Not implemented"),
+                })
+                .cloned()
+                .collect(),
+            _ => panic!("failed to parse sql from db file"),
+        }
+    }
+
+    fn get_column_index(&self, column_name: &str) -> usize {
+        self.columns
+            .iter()
+            .position(|col| col == column_name)
+            .unwrap()
     }
 }
