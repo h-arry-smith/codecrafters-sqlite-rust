@@ -129,13 +129,18 @@ impl Parser {
 
         self.consume(Token::Select);
 
-        match self.peek_token() {
-            Token::Star => {
-                result_columns.push(Ast::All);
-                self.consume(Token::Star);
-            }
-            _ => {
-                result_columns.push(self.parse_expr());
+        while self.peek_token() != &Token::From {
+            match self.peek_token() {
+                Token::Star => {
+                    result_columns.push(Ast::All);
+                    self.consume(Token::Star);
+                }
+                _ => {
+                    result_columns.push(self.parse_expr());
+                    if self.peek_token() == &Token::Comma {
+                        self.consume(Token::Comma);
+                    }
+                }
             }
         }
 
@@ -338,6 +343,31 @@ mod tests {
             result_columns: vec![Ast::Expr(Box::new(Ast::Identifier("APPLE".to_string())))],
             from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
                 "FRUITS".to_string(),
+            )))),
+        }))]);
+
+        let ast = parser.parse();
+
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn select_multiple_columns() {
+        let input = "SELECT name, color FROM apples;";
+
+        let mut lexer = Lexer::new(input.to_string());
+
+        let tokens = lexer.lex();
+
+        let mut parser = Parser::new(tokens);
+
+        let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::Select {
+            result_columns: vec![
+                Ast::Expr(Box::new(Ast::Identifier("NAME".to_string()))),
+                Ast::Expr(Box::new(Ast::Identifier("COLOR".to_string()))),
+            ],
+            from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
+                "APPLES".to_string(),
             )))),
         }))]);
 

@@ -1,7 +1,7 @@
 use crate::{
     lexer::Lexer,
     parser::{Ast, Parser},
-    Db, Table,
+    Db, Table, Value,
 };
 
 pub struct SqlEngine {}
@@ -49,6 +49,7 @@ impl SqlEngine {
             Ast::Table(table_name) => {
                 let table = db.get_table(&table_name);
 
+                let mut columns_to_match = Vec::new();
                 for result_col in result_columns {
                     match result_col {
                         Ast::Expr(expr) => match *expr {
@@ -57,13 +58,15 @@ impl SqlEngine {
                             }
                             // TODO: Handle multiple columns
                             Ast::Identifier(col_name) => {
-                                self.select_column_from_table(&table, &col_name, db);
+                                columns_to_match.push(col_name);
                             }
                             _ => panic!("Not implemented {:?}", expr),
                         },
                         _ => panic!("Not implemented {:?}", result_col),
                     }
                 }
+
+                self.select_columns_from_table(&table, columns_to_match, db);
             }
             _ => panic!("Not implemented {:?}", from),
         }
@@ -89,15 +92,30 @@ impl SqlEngine {
         }
     }
 
-    fn select_column_from_table(&self, table: &Table, col_name: &str, db: &mut Db) {
+    fn select_columns_from_table(&self, table: &Table, columns_to_match: Vec<String>, db: &mut Db) {
         let db_page = db.load_table(table);
-        let col_index = table.get_column_index(col_name);
+        let col_indexes = columns_to_match
+            .iter()
+            .map(|col_name| table.get_column_index(col_name))
+            .collect::<Vec<usize>>();
 
         let mut results = Vec::new();
 
         for record in db_page.records {
-            let value = record.values[col_index].clone();
-            results.push(value);
+            let mut table_results = Vec::new();
+            for index in &col_indexes {
+                let value = record.values[*index].clone();
+                table_results.push(value);
+            }
+            if !table_results.is_empty() {
+                results.push(
+                    table_results
+                        .iter()
+                        .map(|v| format!("{}", v))
+                        .collect::<Vec<String>>()
+                        .join("|"),
+                );
+            }
         }
 
         for result in results {
