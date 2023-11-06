@@ -606,7 +606,7 @@ enum DataType {
     Text(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Value {
     Int(i64),
     Text(String),
@@ -900,6 +900,7 @@ impl Table {
     }
 
     fn get_column_index(&self, column_name: &str) -> usize {
+        eprintln!("trying to find {} in {:?}", column_name, self.columns);
         self.columns
             .iter()
             .position(|col| col == column_name)

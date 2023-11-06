@@ -8,6 +8,7 @@ pub enum Token {
     Table,
     Select,
     From,
+    Where,
 
     // PUNCTUATION
     LParen,
@@ -16,8 +17,10 @@ pub enum Token {
     Dot,
     Comma,
     Star,
+    Equals,
 
-    // IDENTIFIERS
+    // LITERALS
+    StringLiteral(String),
     Identifier(String),
 
     // CONSTRAINTS
@@ -84,6 +87,10 @@ impl Lexer {
                 self.position += 1;
                 Token::Comma
             }
+            '=' => {
+                self.position += 1;
+                Token::Equals
+            }
             '-' => {
                 self.position += 1;
                 current_char = self.input.chars().nth(self.position).unwrap();
@@ -101,6 +108,18 @@ impl Lexer {
             '*' => {
                 self.position += 1;
                 Token::Star
+            }
+            '\'' => {
+                self.position += 1;
+                let mut string_literal = String::new();
+                current_char = self.input.chars().nth(self.position).unwrap();
+                while current_char != '\'' {
+                    string_literal.push(current_char);
+                    self.position += 1;
+                    current_char = self.input.chars().nth(self.position).unwrap();
+                }
+                self.position += 1;
+                Token::StringLiteral(string_literal)
             }
             _ => {
                 if current_char.is_alphabetic() {
@@ -123,6 +142,7 @@ impl Lexer {
                         "KEY" => Token::Key,
                         "SELECT" => Token::Select,
                         "FROM" => Token::From,
+                        "WHERE" => Token::Where,
                         _ => Token::Identifier(identifier.to_ascii_uppercase()),
                     }
                 } else if current_char.is_whitespace() {
@@ -229,6 +249,31 @@ mod tests {
             Token::RParen,
             Token::From,
             Token::Identifier("EMPLOYEE".to_string()),
+            Token::Semicolon,
+            Token::Eof,
+        ];
+
+        let tokens = lexer.lex();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn select_from_where() {
+        let input = "SELECT name, color FROM apples WHERE color = 'Yellow';";
+
+        let mut lexer = Lexer::new(input.to_string());
+
+        let expected = vec![
+            Token::Select,
+            Token::Identifier("NAME".to_string()),
+            Token::Comma,
+            Token::Identifier("COLOR".to_string()),
+            Token::From,
+            Token::Identifier("APPLES".to_string()),
+            Token::Where,
+            Token::Identifier("COLOR".to_string()),
+            Token::Equals,
+            Token::StringLiteral("Yellow".to_string()),
             Token::Semicolon,
             Token::Eof,
         ];

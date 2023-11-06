@@ -8,6 +8,7 @@ pub enum Ast {
     Select {
         result_columns: Vec<Ast>,
         from: Box<Ast>,
+        r#where: Option<Box<Ast>>,
     },
     TableOrSubQuery(Box<Ast>),
     Table(String),
@@ -26,6 +27,17 @@ pub enum Ast {
         constraints: Vec<Constraint>,
     },
     Identifier(String),
+    StringLiteral(String),
+    BinaryOp {
+        op: Op,
+        lhs: Box<Ast>,
+        rhs: Box<Ast>,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum Op {
+    Equal,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -136,6 +148,7 @@ impl Parser {
                     self.consume(Token::Star);
                 }
                 _ => {
+                    eprintln!("Parsing expr for result column");
                     result_columns.push(self.parse_expr());
                     if self.peek_token() == &Token::Comma {
                         self.consume(Token::Comma);
@@ -144,16 +157,21 @@ impl Parser {
             }
         }
 
-        if self.peek_token() == &Token::Star {
-            result_columns.push(Ast::All);
-            self.consume(Token::Star);
-        }
-
         let from = self.parse_from();
+
+        let r#where = if self.peek_token() == &Token::Where {
+            eprintln!("Parsing where");
+            self.consume(Token::Where);
+            let expr = dbg!(self.parse_expr());
+            Some(Box::new(expr))
+        } else {
+            None
+        };
 
         Ast::Select {
             result_columns,
             from: Box::new(from),
+            r#where,
         }
     }
 
@@ -178,17 +196,36 @@ impl Parser {
 
     fn parse_expr(&mut self) -> Ast {
         eprintln!("Parsing expr");
-        let identifier = self.consume(Token::Identifier("".to_string()));
 
-        match identifier {
+        match self.peek_token().clone() {
             Token::Identifier(name) => {
-                if self.peek_token() == &Token::LParen {
-                    self.parse_function(name)
-                } else {
-                    Ast::Expr(Box::new(Ast::Identifier(name)))
+                self.consume(Token::Identifier("".to_string()));
+                match self.peek_token() {
+                    Token::LParen => self.parse_function(name),
+                    _ => {
+                        if self.peek_token() == &Token::Equals {
+                            eprintln!("parsing binary op equals");
+                            eprintln!("current tok is {:?}", self.peek_token());
+                            eprintln!("next tok is {:?}", self.peek_next());
+                            self.consume(Token::Equals);
+                            eprintln!("tok after equals is {:?}", self.peek_token());
+                            let rhs = self.parse_expr();
+                            Ast::Expr(Box::new(Ast::BinaryOp {
+                                op: Op::Equal,
+                                lhs: Box::new(Ast::Expr(Box::new(Ast::Identifier(name)))),
+                                rhs: Box::new(rhs),
+                            }))
+                        } else {
+                            Ast::Expr(Box::new(Ast::Identifier(name)))
+                        }
+                    }
                 }
             }
-            _ => panic!("Unexpected token: {:?}", identifier),
+            Token::StringLiteral(value) => {
+                self.position += 1;
+                Ast::Expr(Box::new(Ast::StringLiteral(value.to_string())))
+            }
+            _ => panic!("Unexpected token: {:?}", self.peek_token()),
         }
     }
 
@@ -322,6 +359,7 @@ mod tests {
             from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
                 "EMPLOYEE".to_string(),
             )))),
+            r#where: None,
         }))]);
 
         let ast = parser.parse();
@@ -344,6 +382,7 @@ mod tests {
             from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
                 "FRUITS".to_string(),
             )))),
+            r#where: None,
         }))]);
 
         let ast = parser.parse();
@@ -369,6 +408,7 @@ mod tests {
             from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
                 "APPLES".to_string(),
             )))),
+            r#where: None,
         }))]);
 
         let ast = parser.parse();
@@ -394,6 +434,7 @@ mod tests {
             from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
                 "EMPLOYEE".to_string(),
             )))),
+            r#where: None,
         }))]);
 
         let ast = parser.parse();
@@ -425,6 +466,35 @@ mod tests {
                     constraints: vec![],
                 },
             ],
+        }))]);
+
+        let ast = parser.parse();
+
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn select_from_where() {
+        let input = "SELECT name, color FROM apples WHERE color = 'Yellow';";
+        let mut lexer = Lexer::new(input.to_string());
+        let tokens = lexer.lex();
+        let mut parser = Parser::new(tokens);
+
+        let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::Select {
+            result_columns: vec![
+                Ast::Expr(Box::new(Ast::Identifier("NAME".to_string()))),
+                Ast::Expr(Box::new(Ast::Identifier("COLOR".to_string()))),
+            ],
+            from: Box::new(Ast::TableOrSubQuery(Box::new(Ast::Table(
+                "APPLES".to_string(),
+            )))),
+            r#where: Some(Box::new(Ast::Expr(Box::new(Ast::BinaryOp {
+                op: Op::Equal,
+                lhs: Box::new(Ast::Expr(Box::new(Ast::Identifier("COLOR".to_string())))),
+                rhs: Box::new(Ast::Expr(Box::new(Ast::StringLiteral(
+                    "Yellow".to_string(),
+                )))),
+            })))),
         }))]);
 
         let ast = parser.parse();
