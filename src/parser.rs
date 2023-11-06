@@ -44,6 +44,7 @@ pub enum Op {
 pub enum Constraint {
     PrimaryKey,
     AutoIncrement,
+    NotNull,
 }
 
 #[derive(Debug)]
@@ -131,7 +132,9 @@ impl Parser {
             }
         };
 
-        self.consume(Token::Semicolon);
+        if self.peek_token() == &Token::Semicolon {
+            self.consume(Token::Semicolon);
+        }
         Ast::Stmt(Box::new(statement))
     }
 
@@ -270,11 +273,13 @@ impl Parser {
         self.consume(Token::Create);
         self.consume(Token::Table);
 
-        let name = self.consume(Token::Identifier("".to_string()));
+        let name = self.peek_token().clone();
         let name = match name {
             Token::Identifier(name) => name,
+            Token::StringLiteral(name) => name,
             _ => panic!("Unexpected token: {:?}", name),
         };
+        self.position += 1;
 
         self.consume(Token::LParen);
 
@@ -311,6 +316,13 @@ impl Parser {
                             constraints.push(Constraint::PrimaryKey);
                             self.consume(Token::Primary);
                             self.consume(Token::Key);
+                        }
+                    }
+                    Token::Not => {
+                        if self.peek_next() == &Token::Null {
+                            constraints.push(Constraint::NotNull);
+                            self.consume(Token::Not);
+                            self.consume(Token::Null);
                         }
                     }
                     Token::AutoIncrement => {
@@ -499,6 +511,53 @@ mod tests {
 
         let ast = parser.parse();
 
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn create_superhero_table() {
+        let input = "CREATE TABLE \"superheroes\" (id integer primary key autoincrement, name text not null, eye_color text, hair_color text, appearance_count integer, first_appearance text, first_appearance_year text)";
+        let mut lexer = Lexer::new(input.to_string());
+        let tokens = lexer.lex();
+        let mut parser = Parser::new(tokens);
+
+        let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::CreateTable {
+            name: "SUPERHEROES".to_string(),
+            column_defs: vec![
+                Ast::ColumnDef {
+                    name: "NAME".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![Constraint::NotNull],
+                },
+                Ast::ColumnDef {
+                    name: "EYE_COLOR".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "HAIR_COLOR".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "APPEARANCE_COUNT".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "FIRST_APPEARANCE".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "FIRST_APPEARANCE_YEAR".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+            ],
+        }))]);
+
+        let ast = parser.parse();
         assert_eq!(ast, expected);
     }
 }

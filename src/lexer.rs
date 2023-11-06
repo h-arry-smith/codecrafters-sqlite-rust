@@ -9,6 +9,8 @@ pub enum Token {
     Select,
     From,
     Where,
+    Not,
+    Null,
 
     // PUNCTUATION
     LParen,
@@ -121,6 +123,18 @@ impl Lexer {
                 self.position += 1;
                 Token::StringLiteral(string_literal)
             }
+            '\"' => {
+                self.position += 1;
+                let mut string_literal = String::new();
+                current_char = self.input.chars().nth(self.position).unwrap();
+                while current_char != '\"' {
+                    string_literal.push(current_char);
+                    self.position += 1;
+                    current_char = self.input.chars().nth(self.position).unwrap();
+                }
+                self.position += 1;
+                Token::StringLiteral(string_literal)
+            }
             _ => {
                 if current_char.is_alphabetic() {
                     let mut identifier = String::new();
@@ -143,6 +157,8 @@ impl Lexer {
                         "SELECT" => Token::Select,
                         "FROM" => Token::From,
                         "WHERE" => Token::Where,
+                        "NOT" => Token::Not,
+                        "NULL" => Token::Null,
                         _ => Token::Identifier(identifier.to_ascii_uppercase()),
                     }
                 } else if current_char.is_whitespace() {
@@ -275,6 +291,49 @@ mod tests {
             Token::Equals,
             Token::StringLiteral("Yellow".to_string()),
             Token::Semicolon,
+            Token::Eof,
+        ];
+
+        let tokens = lexer.lex();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn create_example_one() {
+        let input = "CREATE TABLE \"superheroes\" (id integer primary key autoincrement, name text not null, eye_color text, hair_color text, appearance_count integer, first_appearance text, first_appearance_year text)";
+        let mut lexer = Lexer::new(input.to_string());
+
+        let expected = vec![
+            Token::Create,
+            Token::Table,
+            Token::StringLiteral("superheroes".to_string()),
+            Token::LParen,
+            Token::Identifier("ID".to_string()),
+            Token::Identifier("INTEGER".to_string()),
+            Token::Primary,
+            Token::Key,
+            Token::AutoIncrement,
+            Token::Comma,
+            Token::Identifier("NAME".to_string()),
+            Token::Identifier("TEXT".to_string()),
+            Token::Not,
+            Token::Null,
+            Token::Comma,
+            Token::Identifier("EYE_COLOR".to_string()),
+            Token::Identifier("TEXT".to_string()),
+            Token::Comma,
+            Token::Identifier("HAIR_COLOR".to_string()),
+            Token::Identifier("TEXT".to_string()),
+            Token::Comma,
+            Token::Identifier("APPEARANCE_COUNT".to_string()),
+            Token::Identifier("INTEGER".to_string()),
+            Token::Comma,
+            Token::Identifier("FIRST_APPEARANCE".to_string()),
+            Token::Identifier("TEXT".to_string()),
+            Token::Comma,
+            Token::Identifier("FIRST_APPEARANCE_YEAR".to_string()),
+            Token::Identifier("TEXT".to_string()),
+            Token::RParen,
             Token::Eof,
         ];
 

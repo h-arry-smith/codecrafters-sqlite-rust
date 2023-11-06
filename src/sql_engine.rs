@@ -1,7 +1,7 @@
 use crate::{
     lexer::Lexer,
     parser::{Ast, Op, Parser},
-    Db, Record, Table, TableLeafRecord, Value,
+    Db, DbRecord, Record, Table, TableLeafRecord, Value,
 };
 
 struct ExecutionContext {
@@ -34,13 +34,12 @@ impl QueryPlanner {
             match step {
                 QueryStep::LoadTable(string) => {
                     let table = db.get_table(string);
-                    let db_page = db.load_table(&table);
-                    execution_context.rows = Some(db_page.records);
+                    let rows = db.get_table_rows(string);
+                    execution_context.rows = Some(rows);
                     execution_context.table = Some(table);
                 }
                 QueryStep::Filter(ident, value) => {
                     let table = execution_context.table.as_ref().unwrap();
-                    let rows = execution_context.rows.as_ref().unwrap();
                     let col_index = table.get_column_index(ident);
 
                     execution_context.rows = Some(
@@ -60,19 +59,33 @@ impl QueryPlanner {
                     let table = execution_context.table.as_ref().unwrap();
                     let rows = execution_context.rows.as_ref().unwrap();
 
+                    dbg!(columns);
+
                     let col_indexes = if columns != &["*".to_string()] {
                         columns
                             .iter()
-                            .map(|col_name| table.get_column_index(col_name))
-                            .collect::<Vec<usize>>()
+                            .map(|col_name| {
+                                if col_name == "ID" {
+                                    eprintln!("id mapping col index to -1");
+                                    -1
+                                } else {
+                                    table.get_column_index(col_name) as isize
+                                }
+                            })
+                            .collect::<Vec<isize>>()
                     } else {
-                        (0..table.columns.len()).collect::<Vec<usize>>()
+                        (0..table.columns.len() as isize).collect::<Vec<isize>>()
                     };
 
                     for record in rows {
                         let mut table_results = Vec::new();
                         for index in &col_indexes {
-                            let value = record.values[*index].clone();
+                            if index == &-1 {
+                                eprintln!("col index is -1 returning id");
+                                table_results.push(Value::Int(record.header.row_id as i64));
+                                continue;
+                            }
+                            let value = record.values[*index as usize].clone();
                             table_results.push(value);
                         }
                         if !table_results.is_empty() {
@@ -235,57 +248,5 @@ impl SqlEngine {
         }
 
         query_plan.execute(db);
-    }
-
-    fn execute_function(&self, name: String, args: Vec<Ast>, table: &Table, db: &mut Db) {
-        match name.as_str() {
-            "COUNT" => {
-                if args.len() > 1 {
-                    panic!("Only support count with one argument");
-                }
-
-                let arg = &args[0];
-                match arg {
-                    Ast::All => {
-                        let db_page = db.load_table(&table);
-                        println!("{}", db_page.records.len());
-                    }
-                    _ => panic!("Not implemented {:?}", arg),
-                }
-            }
-            _ => panic!("Not implemented {:?}", name),
-        }
-    }
-
-    fn select_columns_from_table(&self, table: &Table, columns_to_match: Vec<String>, db: &mut Db) {
-        let db_page = db.load_table(table);
-
-        let col_indexes = columns_to_match
-            .iter()
-            .map(|col_name| table.get_column_index(col_name))
-            .collect::<Vec<usize>>();
-
-        let mut results = Vec::new();
-
-        for record in db_page.records {
-            let mut table_results = Vec::new();
-            for index in &col_indexes {
-                let value = record.values[*index].clone();
-                table_results.push(value);
-            }
-            if !table_results.is_empty() {
-                results.push(
-                    table_results
-                        .iter()
-                        .map(|v| format!("{}", v))
-                        .collect::<Vec<String>>()
-                        .join("|"),
-                );
-            }
-        }
-
-        for result in results {
-            println!("{}", result);
-        }
     }
 }

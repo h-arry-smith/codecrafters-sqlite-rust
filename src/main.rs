@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 pub struct Db {
     file: File,
     header: DbHeader,
-    master_page: DbPage<TableLeafRecord>,
+    master_page: DbPage,
 }
 
 impl Db {
@@ -77,10 +77,85 @@ impl Db {
         Table::parse(table)
     }
 
-    fn load_table(&mut self, table: &Table) -> DbPage<TableLeafRecord> {
+    fn get_table_record(&mut self, table_name: &str) -> &TableLeafRecord {
+        let table = self
+            .master_page
+            .records
+            .iter()
+            .find(|record| {
+                let table = Table::parse(record);
+                table.name.to_ascii_lowercase() == table_name.to_ascii_lowercase()
+            })
+            .unwrap();
+
+        match table {
+            DbRecord::TableLeafRecord(record) => record,
+            _ => panic!("Not implemented"),
+        }
+    }
+
+    fn load_table(&mut self, table: &Table) -> DbPage {
         eprintln!("### TRYING TO LOAD TABLE {} ###", table.name);
         let offset = dbg!((table.root_page as u64 - 1) * self.header.page_size as u64);
         DbPage::parse(&mut self.file, offset)
+    }
+
+    fn load_table_at_page(&mut self, page: u64) -> DbPage {
+        let offset = (page - 1) * self.header.page_size as u64;
+        DbPage::parse(&mut self.file, offset)
+    }
+
+    fn get_table_rows(&mut self, table_name: &str) -> Vec<TableLeafRecord> {
+        let table = self.get_table(table_name);
+        let table_record = self.get_table_record(table_name);
+        let table_key = table_record.header.row_id;
+        let db_page = self.load_table(&table);
+
+        let mut rows = Vec::new();
+        self.recurse_page_for_rows(db_page, table_key, &mut rows);
+        eprintln!("Found {} rows", rows.len());
+        rows
+    }
+
+    fn recurse_page_for_rows(
+        &mut self,
+        cur_page: DbPage,
+        table_key: u64,
+        rows: &mut Vec<TableLeafRecord>,
+    ) {
+        eprintln!("### RECURSING A {:?} ###", cur_page.header.page_type);
+        match cur_page.header.page_type {
+            PageType::InteriorIndex => todo!(),
+            PageType::InteriorTable => {
+                for record in cur_page.records.iter() {
+                    match record {
+                        DbRecord::InteriorTableRecord(irecord) => {
+                            if irecord.key >= table_key {
+                                let db_page =
+                                    self.load_table_at_page(irecord.left_child_page as u64);
+                                self.recurse_page_for_rows(db_page, table_key, rows);
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            PageType::LeafIndex => todo!(),
+            PageType::LeafTable => {
+                eprintln!(
+                    "### ADDING {} ROWS TO THE COLLECTION ###",
+                    cur_page.records.len()
+                );
+                for record in cur_page.records.iter() {
+                    match record {
+                        DbRecord::TableLeafRecord(trecord) => {
+                            rows.push((*trecord).clone());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -143,56 +218,48 @@ impl<R: Read> ByteReader for R {
     fn read_u8(&mut self) -> u8 {
         let mut buf = [0; 1];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         u8::from_be_bytes(buf)
     }
 
     fn read_u16(&mut self) -> u16 {
         let mut buf = [0; 2];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         u16::from_be_bytes(buf)
     }
 
     fn read_u32(&mut self) -> u32 {
         let mut buf = [0; 4];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         u32::from_be_bytes(buf)
     }
 
     fn read_u64(&mut self) -> u64 {
         let mut buf = [0; 8];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         u64::from_be_bytes(buf)
     }
 
     fn read_i8(&mut self) -> i8 {
         let mut buf = [0; 1];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         i8::from_be_bytes(buf)
     }
 
     fn read_i16(&mut self) -> i16 {
         let mut buf = [0; 2];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         i16::from_be_bytes(buf)
     }
 
     fn read_i32(&mut self) -> i32 {
         let mut buf = [0; 4];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         i32::from_be_bytes(buf)
     }
 
     fn read_i64(&mut self) -> i64 {
         let mut buf = [0; 8];
         self.read_exact(&mut buf).unwrap();
-        eprintln!("{:x?}", buf);
         i64::from_be_bytes(buf)
     }
 
@@ -543,25 +610,81 @@ impl DbPageHeader {
 
 #[derive(Debug)]
 #[allow(dead_code)]
-struct DbPage<R: Record> {
+struct DbPage {
     header: DbPageHeader,
-    records: Vec<R>,
+    records: Vec<DbRecord>,
 }
 
-impl<R: Record> DbPage<R> {
+impl DbPage {
     fn parse<B: Read + ByteReader + Seek>(reader: &mut B, page_offset: u64) -> Self {
         reader.seek(SeekFrom::Start(page_offset)).unwrap();
-        let header = dbg!(DbPageHeader::parse(reader));
-        let mut records = vec![];
+        let header = DbPageHeader::parse(reader);
 
-        eprintln!("header: {:#x?}", header);
+        match header.page_type {
+            PageType::LeafTable => {
+                eprintln!("leaf table");
+                Self::parse_leaf_table_page(reader, page_offset, header)
+            }
+            PageType::LeafIndex => {
+                eprintln!("leaf index");
+                Self::parse_leaf_index_page(reader, page_offset, header)
+            }
+            PageType::InteriorTable => {
+                eprintln!("interior table");
+                Self::parse_interior_table_page(reader, page_offset, header)
+            }
+            _ => todo!("page type: {:?}", header.page_type),
+        }
+    }
+
+    fn parse_leaf_table_page<B: Read + ByteReader + Seek>(
+        reader: &mut B,
+        page_offset: u64,
+        header: DbPageHeader,
+    ) -> Self {
+        let mut records = vec![];
 
         for cell in &header.cells {
             reader
                 .seek(SeekFrom::Start(page_offset + *cell as u64))
                 .unwrap();
-            eprintln!("cell: {:x}", cell);
-            let record = R::parse(reader);
+            let record = DbRecord::parse_table_leaf_record(reader);
+            records.push(record);
+        }
+
+        Self { header, records }
+    }
+
+    fn parse_leaf_index_page<B: Read + ByteReader + Seek>(
+        reader: &mut B,
+        page_offset: u64,
+        header: DbPageHeader,
+    ) -> Self {
+        let mut records = vec![];
+
+        for cell in &header.cells {
+            reader
+                .seek(SeekFrom::Start(page_offset + *cell as u64))
+                .unwrap();
+            let record = DbRecord::parse_index_leaf_record(reader);
+            records.push(record);
+        }
+
+        Self { header, records }
+    }
+
+    fn parse_interior_table_page<B: Read + ByteReader + Seek>(
+        reader: &mut B,
+        page_offset: u64,
+        header: DbPageHeader,
+    ) -> Self {
+        let mut records = vec![];
+
+        for cell in &header.cells {
+            reader
+                .seek(SeekFrom::Start(page_offset + *cell as u64))
+                .unwrap();
+            let record = DbRecord::parse_table_index_record(reader);
             records.push(record);
         }
 
@@ -573,12 +696,9 @@ impl<R: Record> DbPage<R> {
         let header = dbg!(DbPageHeader::parse(reader));
         let mut records = vec![];
 
-        eprintln!("header: {:#x?}", header);
-
         for cell in &header.cells {
             reader.seek(SeekFrom::Start(*cell as u64)).unwrap();
-            eprintln!("cell: {:x}", cell);
-            let record = R::parse(reader);
+            let record = DbRecord::parse_table_leaf_record(reader);
             records.push(record);
         }
 
@@ -586,11 +706,59 @@ impl<R: Record> DbPage<R> {
     }
 }
 
+#[derive(Debug)]
+enum DbRecord {
+    TableLeafRecord(TableLeafRecord),
+    IndexLeafRecord(IndexLeafRecord),
+    InteriorTableRecord(InteriorTableRecord),
+}
+
+#[derive(Debug)]
+struct IndexLeafRecord {
+    length: u64,
+    payload: Vec<u8>,
+    oveflow: Option<u32>,
+}
+
+impl Record for IndexLeafRecord {
+    fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let (length, _) = reader.read_varint();
+        eprintln!("length: {:x}", length);
+        let mut payload: Vec<u8> = vec![0; length as usize];
+        reader.read_exact(&mut payload).unwrap();
+        let (overflow, _) = reader.read_varint();
+        eprintln!("overflow: {:x}", overflow);
+
+        Self {
+            length,
+            payload,
+            oveflow: None,
+        }
+    }
+}
+
+impl DbRecord {
+    fn parse_table_leaf_record<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let record = TableLeafRecord::parse(reader);
+        Self::TableLeafRecord(record)
+    }
+
+    fn parse_index_leaf_record<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let record = IndexLeafRecord::parse(reader);
+        Self::IndexLeafRecord(record)
+    }
+
+    fn parse_table_index_record<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let record = InteriorTableRecord::parse(reader);
+        Self::InteriorTableRecord(record)
+    }
+}
+
 trait Record {
     fn parse<R: Read + ByteReader>(reader: &mut R) -> Self;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum DataType {
     Null,
     Int8,
@@ -759,7 +927,7 @@ impl From<u64> for DataType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct TableLeafRecord {
     header: TableLeafRecordHeader,
@@ -768,7 +936,7 @@ struct TableLeafRecord {
     values: Vec<Value>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct DataSpecification {
     size: usize,
@@ -784,12 +952,8 @@ impl DataSpecification {
 
         while !payload_reader.is_empty() {
             let (data_type, data_type_size) = payload_reader.read_varint();
-            eprintln!("data_type: {:x}", data_type);
-            eprintln!("data_type_size: {:x}", data_type_size);
             types.push(data_type.into());
         }
-
-        dbg!(&types);
 
         Self {
             size: size - 1,
@@ -801,18 +965,13 @@ impl DataSpecification {
 impl Record for TableLeafRecord {
     fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
         let (size, _) = reader.read_varint();
-        eprintln!("size: {:x}", size);
         let (row_id, _) = reader.read_varint();
-        eprintln!("row_id: {:x}", row_id);
         let header = TableLeafRecordHeader { size, row_id };
-        eprintln!("header: {:#?}", header);
         let mut payload = vec![0; size as usize];
         reader.read_exact(&mut payload).unwrap();
 
         let mut payload = payload.as_slice();
         let (column_header_size, column_header_size_count) = payload.read_varint();
-        eprintln!("column_header_size: {:x}", column_header_size);
-        eprintln!("column_header_size_count: {:x}", column_header_size_count);
 
         let data_specification = DataSpecification::parse(
             &mut payload,
@@ -834,11 +993,30 @@ impl Record for TableLeafRecord {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct TableLeafRecordHeader {
     size: u64,
     row_id: u64,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct InteriorTableRecord {
+    left_child_page: u32,
+    key: u64,
+}
+
+impl Record for InteriorTableRecord {
+    fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let left_child_page = reader.read_u32();
+        let key = reader.read_varint().0;
+
+        Self {
+            left_child_page,
+            key,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -851,7 +1029,12 @@ struct Table {
 }
 
 impl Table {
-    fn parse(record: &TableLeafRecord) -> Self {
+    fn parse(record: &DbRecord) -> Self {
+        let record = match record {
+            DbRecord::TableLeafRecord(record) => record,
+            _ => panic!("Not implemented"),
+        };
+
         let table_type: String = record.values.get(0).unwrap().clone().try_into().unwrap();
         eprintln!("table_type: {}", table_type);
         assert!(table_type == "table");
