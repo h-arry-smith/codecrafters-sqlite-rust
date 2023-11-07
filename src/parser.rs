@@ -33,6 +33,11 @@ pub enum Ast {
         lhs: Box<Ast>,
         rhs: Box<Ast>,
     },
+    CreateIndex {
+        name: String,
+        table_name: String,
+        columns: Vec<Ast>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -62,7 +67,6 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> Ast {
-        dbg!(&self.tokens);
         let statements = self.parse_statements();
 
         Ast::StmtList(statements)
@@ -85,7 +89,6 @@ impl Parser {
     }
 
     fn consume(&mut self, token: Token) -> Token {
-        dbg!(&token);
         match token {
             Token::Identifier(_) => {
                 if let Token::Identifier(_) = self.peek_token() {
@@ -110,7 +113,6 @@ impl Parser {
         let mut statements = Vec::new();
 
         loop {
-            eprintln!("Parsing statement {}", statements.len() + 1);
             let statement = self.parse_statement();
 
             statements.push(statement);
@@ -139,7 +141,6 @@ impl Parser {
     }
 
     fn parse_select(&mut self) -> Ast {
-        eprintln!("Parsing select");
         let mut result_columns = Vec::new();
 
         self.consume(Token::Select);
@@ -151,7 +152,6 @@ impl Parser {
                     self.consume(Token::Star);
                 }
                 _ => {
-                    eprintln!("Parsing expr for result column");
                     result_columns.push(self.parse_expr());
                     if self.peek_token() == &Token::Comma {
                         self.consume(Token::Comma);
@@ -163,9 +163,8 @@ impl Parser {
         let from = self.parse_from();
 
         let r#where = if self.peek_token() == &Token::Where {
-            eprintln!("Parsing where");
             self.consume(Token::Where);
-            let expr = dbg!(self.parse_expr());
+            let expr = self.parse_expr();
             Some(Box::new(expr))
         } else {
             None
@@ -179,7 +178,6 @@ impl Parser {
     }
 
     fn parse_from(&mut self) -> Ast {
-        eprintln!("Parsing from");
         self.consume(Token::From);
 
         let table_or_subquery = self.parse_table_or_subquery();
@@ -188,7 +186,6 @@ impl Parser {
     }
 
     fn parse_table_or_subquery(&mut self) -> Ast {
-        eprintln!("Parsing table or subquery");
         let identifier = self.consume(Token::Identifier("".to_string()));
 
         match identifier {
@@ -198,8 +195,6 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Ast {
-        eprintln!("Parsing expr");
-
         match self.peek_token().clone() {
             Token::Identifier(name) => {
                 self.consume(Token::Identifier("".to_string()));
@@ -207,11 +202,7 @@ impl Parser {
                     Token::LParen => self.parse_function(name),
                     _ => {
                         if self.peek_token() == &Token::Equals {
-                            eprintln!("parsing binary op equals");
-                            eprintln!("current tok is {:?}", self.peek_token());
-                            eprintln!("next tok is {:?}", self.peek_next());
                             self.consume(Token::Equals);
-                            eprintln!("tok after equals is {:?}", self.peek_token());
                             let rhs = self.parse_expr();
                             Ast::Expr(Box::new(Ast::BinaryOp {
                                 op: Op::Equal,
@@ -233,7 +224,6 @@ impl Parser {
     }
 
     fn parse_function(&mut self, name: String) -> Ast {
-        eprintln!("Parsing function");
         self.consume(Token::LParen);
 
         let args = self.parse_function_arguments();
@@ -242,7 +232,6 @@ impl Parser {
     }
 
     fn parse_function_arguments(&mut self) -> Vec<Ast> {
-        eprintln!("Parsing function arguments");
         let mut args = Vec::new();
 
         loop {
@@ -269,10 +258,17 @@ impl Parser {
     }
 
     pub fn parse_create(&mut self) -> Ast {
-        eprintln!("Parsing create");
         self.consume(Token::Create);
-        self.consume(Token::Table);
 
+        match self.peek_token() {
+            Token::Table => self.parse_create_table(),
+            Token::Index => self.parse_create_index(),
+            _ => panic!("Unexpected token: {:?}", self.peek_token()),
+        }
+    }
+
+    fn parse_create_table(&mut self) -> Ast {
+        self.consume(Token::Table);
         let name = self.peek_token().clone();
         let name = match name {
             Token::Identifier(name) => name,
@@ -280,6 +276,10 @@ impl Parser {
             _ => panic!("Unexpected token: {:?}", name),
         };
         self.position += 1;
+
+        if name == "SQLITE_SEQUENCE" {
+            return self.sqlite_sequence_hack();
+        }
 
         self.consume(Token::LParen);
 
@@ -290,16 +290,89 @@ impl Parser {
         Ast::CreateTable { name, column_defs }
     }
 
+    fn parse_create_index(&mut self) -> Ast {
+        self.consume(Token::Index);
+        let name = self.peek_token().clone();
+        let name = match name {
+            Token::Identifier(name) => name,
+            Token::StringLiteral(name) => name,
+            _ => panic!("Unexpected token: {:?}", name),
+        };
+        self.position += 1;
+        self.consume(Token::On);
+        let table_name = self.peek_token().clone();
+        let table_name = match table_name {
+            Token::Identifier(name) => name,
+            Token::StringLiteral(name) => name,
+            _ => panic!("Unexpected token: {:?}", table_name),
+        };
+        self.position += 1;
+        self.consume(Token::LParen);
+        let mut columns = Vec::new();
+
+        loop {
+            if self.peek_token() == &Token::RParen {
+                break;
+            }
+
+            if self.peek_token() == &Token::Comma {
+                self.consume(Token::Comma);
+            }
+
+            let column = self.peek_token().clone();
+            let column = match column {
+                Token::Identifier(name) => name,
+                Token::StringLiteral(name) => name,
+                _ => panic!("Unexpected token: {:?}", column),
+            };
+            self.position += 1;
+            columns.push(Ast::Identifier(column));
+        }
+
+        self.consume(Token::RParen);
+
+        Ast::CreateIndex {
+            name,
+            table_name,
+            columns,
+        }
+    }
+
+    fn sqlite_sequence_hack(&mut self) -> Ast {
+        self.consume(Token::LParen);
+        self.consume(Token::Identifier("".to_string()));
+        self.consume(Token::Comma);
+        self.consume(Token::Identifier("".to_string()));
+        self.consume(Token::RParen);
+
+        Ast::CreateTable {
+            name: "SQLITE_SEQUENCE".to_string(),
+            column_defs: vec![
+                Ast::ColumnDef {
+                    name: "NAME".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "SEQ".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    constraints: vec![],
+                },
+            ],
+        }
+    }
+
     fn parse_column_defs(&mut self) -> Vec<Ast> {
-        eprintln!("Parsing column defs");
         let mut column_defs = Vec::new();
 
         loop {
-            let name = self.consume(Token::Identifier("".to_string()));
+            let name = self.peek_token().clone();
             let name = match name {
                 Token::Identifier(name) => name,
+                Token::StringLiteral(name) => name.to_ascii_uppercase(),
                 _ => panic!("Unexpected token: {:?}", name),
             };
+            self.position += 1;
 
             let data_type = self.consume(Token::Identifier("".to_string()));
             let data_type = match data_type {
@@ -310,7 +383,7 @@ impl Parser {
             let mut constraints = Vec::new();
 
             loop {
-                match dbg!(self.peek_token()) {
+                match self.peek_token() {
                     Token::Primary => {
                         if self.peek_next() == &Token::Key {
                             constraints.push(Constraint::PrimaryKey);
@@ -353,7 +426,9 @@ impl Parser {
 }
 
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
+    #[allow(unused_imports)]
     use crate::lexer::Lexer;
 
     #[test]
@@ -522,8 +597,13 @@ mod tests {
         let mut parser = Parser::new(tokens);
 
         let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::CreateTable {
-            name: "SUPERHEROES".to_string(),
+            name: "superheroes".to_string(),
             column_defs: vec![
+                Ast::ColumnDef {
+                    name: "ID".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    constraints: vec![Constraint::PrimaryKey, Constraint::AutoIncrement],
+                },
                 Ast::ColumnDef {
                     name: "NAME".to_string(),
                     data_type: "TEXT".to_string(),
@@ -555,6 +635,84 @@ mod tests {
                     constraints: vec![],
                 },
             ],
+        }))]);
+
+        let ast = parser.parse();
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn create_table_with_string_literal_column_name() {
+        let input = "CREATE TABLE companies\n(\n\tid integer primary key autoincrement\n, \"size range\" text, locality text);";
+        let mut lexer = Lexer::new(input.to_string());
+        let tokens = lexer.lex();
+        let mut parser = Parser::new(tokens);
+
+        let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::CreateTable {
+            name: "COMPANIES".to_string(),
+            column_defs: vec![
+                Ast::ColumnDef {
+                    name: "ID".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    constraints: vec![Constraint::PrimaryKey, Constraint::AutoIncrement],
+                },
+                Ast::ColumnDef {
+                    name: "SIZE RANGE".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "LOCALITY".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+            ],
+        }))]);
+
+        let ast = parser.parse();
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn sqlite_sequence() {
+        let input = "CREATE TABLE sqlite_sequence(name,seq);";
+        let mut lexer = Lexer::new(input.to_string());
+        let tokens = lexer.lex();
+        let mut parser = Parser::new(tokens);
+
+        let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::CreateTable {
+            name: "SQLITE_SEQUENCE".to_string(),
+            column_defs: vec![
+                Ast::ColumnDef {
+                    name: "NAME".to_string(),
+                    data_type: "TEXT".to_string(),
+                    constraints: vec![],
+                },
+                Ast::ColumnDef {
+                    name: "SEQ".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    constraints: vec![],
+                },
+            ],
+        }))]);
+
+        let ast = parser.parse();
+        assert_eq!(ast, expected);
+    }
+
+    #[test]
+    fn create_index() {
+        let input =
+            "CREATE INDEX idx_superheroes_first_appeared ON superheroes (first_appearance);";
+        let mut lexer = Lexer::new(input.to_string());
+        let tokens = lexer.lex();
+        let mut parser = Parser::new(tokens);
+
+        let expected = Ast::StmtList(vec![Ast::Stmt(Box::new(Ast::CreateIndex {
+            name: "IDX_SUPERHEROES_FIRST_APPEARED".to_string(),
+            table_name: "SUPERHEROES".to_string(),
+            // TODO: This isn't exactly true to spec, I'm taking some easier shortcuts to get this challenge done!
+            columns: vec![Ast::Identifier("FIRST_APPEARANCE".to_string())],
         }))]);
 
         let ast = parser.parse();

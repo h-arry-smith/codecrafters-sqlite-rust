@@ -1,12 +1,12 @@
 use crate::{
     lexer::Lexer,
     parser::{Ast, Op, Parser},
-    Db, DbRecord, Record, Table, TableLeafRecord, Value,
+    Db, MasterPageRecord, TableLeafRecord, Value,
 };
 
 struct ExecutionContext {
     rows: Option<Vec<TableLeafRecord>>,
-    table: Option<Table>,
+    table: Option<MasterPageRecord>,
 }
 
 struct QueryPlanner {
@@ -32,15 +32,21 @@ impl QueryPlanner {
 
         for step in self.steps.iter() {
             match step {
-                QueryStep::LoadTable(string) => {
+                QueryStep::SetTable(string) => {
                     let table = db.get_table(string);
-                    let rows = db.get_table_rows(string);
-                    execution_context.rows = Some(rows);
-                    execution_context.table = Some(table);
+                    execution_context.table = Some((*table).clone());
                 }
-                QueryStep::Filter(ident, value) => {
+                QueryStep::Where(ident, value) => {
                     let table = execution_context.table.as_ref().unwrap();
                     let col_index = table.get_column_index(ident);
+
+                    // FIXME: This is not to spec! Can be more than one column in an index!
+                    if let Some(index) = db.get_index_for_column_and_table(&table.table_name, ident)
+                    {
+                        execution_context.rows = Some(db.fetch_rows_from_index(&index, value));
+                    } else {
+                        execution_context.rows = Some(db.get_table_rows(table, &mut None));
+                    }
 
                     execution_context.rows = Some(
                         execution_context
@@ -57,9 +63,13 @@ impl QueryPlanner {
                 }
                 QueryStep::Select(columns) => {
                     let table = execution_context.table.as_ref().unwrap();
-                    let rows = execution_context.rows.as_ref().unwrap();
 
-                    dbg!(columns);
+                    // If we get here and no rows have been fetched, then we need to fetch all the rows
+                    if execution_context.rows.is_none() {
+                        execution_context.rows = Some(db.get_table_rows(table, &mut None));
+                    }
+
+                    let rows = execution_context.rows.as_ref().unwrap();
 
                     let col_indexes = if columns != &["*".to_string()] {
                         columns
@@ -102,6 +112,11 @@ impl QueryPlanner {
                         panic!("Only support count(*) for now");
                     }
 
+                    if execution_context.rows.is_none() {
+                        let table = execution_context.table.as_ref().unwrap();
+                        execution_context.rows = Some(db.get_table_rows(table, &mut None));
+                    }
+
                     let rows = execution_context.rows.as_ref().unwrap();
                     results.push(format!("{}", rows.len()));
                 }
@@ -114,9 +129,10 @@ impl QueryPlanner {
     }
 }
 
+#[derive(Debug)]
 enum QueryStep {
-    LoadTable(String),
-    Filter(String, Value),
+    SetTable(String),
+    Where(String, Value),
     Select(Vec<String>),
     Count(String),
 }
@@ -176,7 +192,7 @@ impl SqlEngine {
             _ => panic!("Not implemented {:?}", from),
         };
 
-        query_plan.add_step(QueryStep::LoadTable(table_name));
+        query_plan.add_step(QueryStep::SetTable(table_name));
 
         if let Some(where_clause) = r#where {
             if let Ast::Expr(expr) = *where_clause {
@@ -204,7 +220,7 @@ impl SqlEngine {
                             panic!("Only support equals for now");
                         }
 
-                        query_plan.add_step(QueryStep::Filter(column_name, Value::Text(value)));
+                        query_plan.add_step(QueryStep::Where(column_name, Value::Text(value)));
                     }
                     _ => panic!("Not implemented {:?}", expr),
                 }

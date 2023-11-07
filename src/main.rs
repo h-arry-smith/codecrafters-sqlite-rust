@@ -36,6 +36,7 @@ pub struct Db {
     file: File,
     header: DbHeader,
     master_page: DbPage,
+    master_page_records: Vec<MasterPageRecord>,
 }
 
 impl Db {
@@ -44,10 +45,17 @@ impl Db {
         let header = DbHeader::parse(&mut file);
         let master_page = DbPage::parse_master(&mut file);
 
+        let master_page_records = master_page
+            .records
+            .iter()
+            .map(MasterPageRecord::parse)
+            .collect::<Vec<_>>();
+
         Self {
             file,
             header,
             master_page,
+            master_page_records,
         }
     }
 
@@ -62,19 +70,13 @@ impl Db {
         }
     }
 
-    fn get_table(&mut self, table_name: &str) -> Table {
-        dbg!(&self.master_page.records);
-        let table = self
-            .master_page
-            .records
+    fn get_table(&mut self, table_name: &str) -> &MasterPageRecord {
+        self.master_page_records
             .iter()
             .find(|record| {
-                let table = dbg!(Table::parse(record));
-                table.name.to_ascii_lowercase() == table_name.to_ascii_lowercase()
+                record.table_name.to_ascii_lowercase() == table_name.to_ascii_lowercase()
             })
-            .unwrap();
-
-        Table::parse(table)
+            .unwrap()
     }
 
     fn get_table_record(&mut self, table_name: &str) -> &TableLeafRecord {
@@ -83,7 +85,7 @@ impl Db {
             .records
             .iter()
             .find(|record| {
-                let table = Table::parse(record);
+                let table = MasterPageRecord::parse(record);
                 table.name.to_ascii_lowercase() == table_name.to_ascii_lowercase()
             })
             .unwrap();
@@ -94,61 +96,223 @@ impl Db {
         }
     }
 
-    fn load_table(&mut self, table: &Table) -> DbPage {
-        let offset = dbg!((table.root_page as u64 - 1) * self.header.page_size as u64);
+    fn load_table(&mut self, table: &MasterPageRecord) -> DbPage {
+        let offset = (table.root_page as u64 - 1) * self.header.page_size as u64;
         DbPage::parse(&mut self.file, offset)
     }
 
     fn load_table_at_page(&mut self, page: u64) -> DbPage {
         let offset = (page - 1) * self.header.page_size as u64;
+
         DbPage::parse(&mut self.file, offset)
     }
 
-    fn get_table_rows(&mut self, table_name: &str) -> Vec<TableLeafRecord> {
-        let table = self.get_table(table_name);
-        let table_record = self.get_table_record(table_name);
+    fn get_table_rows(
+        &mut self,
+        table: &MasterPageRecord,
+        row_ids: &mut Option<Vec<u32>>,
+    ) -> Vec<TableLeafRecord> {
+        let table_record = self.get_table_record(&table.name);
         let table_key = table_record.header.row_id;
-        let db_page = self.load_table(&table);
+        let db_page = self.load_table(table);
 
         let mut rows = Vec::new();
-        self.recurse_page_for_rows(db_page, table_key, &mut rows);
-        rows
+        self.recurse_page_for_rows(db_page, table_key, &mut rows, None, row_ids);
+
+        let table_leaf_records = rows
+            .iter()
+            .map(|row| match row {
+                DbRecord::TableLeafRecord(trecord) => trecord.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+
+        table_leaf_records
     }
 
     fn recurse_page_for_rows(
         &mut self,
         cur_page: DbPage,
         table_key: u64,
-        rows: &mut Vec<TableLeafRecord>,
+        rows: &mut Vec<DbRecord>,
+        where_clause: Option<(usize, &Value)>,
+        row_ids: &mut Option<Vec<u32>>,
     ) {
+        let look_for_row_ids = row_ids.is_some();
+
+        if look_for_row_ids {}
+
+        if look_for_row_ids && row_ids.as_ref().unwrap().is_empty() {
+            return;
+        }
+
         match cur_page.header.page_type {
-            PageType::InteriorIndex => todo!(),
+            PageType::InteriorIndex => {
+                for record in cur_page.records.iter() {
+                    match record {
+                        DbRecord::InteriorIndexRecord(irecord) => {
+                            let value = where_clause.unwrap().1;
+                            let irecord_value = &irecord.values[0];
+
+                            if irecord_value.as_bytes() > value.as_bytes() {
+                                let db_page = self.load_table_at_page(irecord.left_child as u64);
+                                self.recurse_page_for_rows(
+                                    db_page,
+                                    table_key,
+                                    rows,
+                                    where_clause,
+                                    row_ids,
+                                );
+                                break;
+                            } else if irecord_value == value {
+                                rows.push((*record).clone());
+                                let db_page = self.load_table_at_page(irecord.left_child as u64);
+                                self.recurse_page_for_rows(
+                                    db_page,
+                                    table_key,
+                                    rows,
+                                    where_clause,
+                                    row_ids,
+                                );
+                                break;
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let db_page =
+                    self.load_table_at_page(cur_page.header.rightmost_pointer.unwrap() as u64);
+                self.recurse_page_for_rows(db_page, table_key, rows, where_clause, row_ids);
+            }
             PageType::InteriorTable => {
+                if look_for_row_ids {
+                    let my_row_ids = row_ids.as_mut().unwrap();
+                    let first_row_id = my_row_ids.first().unwrap();
+                    let first_record = cur_page.records.first().unwrap();
+                    let last_record = cur_page.records.last().unwrap();
+
+                    let first_record = match first_record {
+                        DbRecord::InteriorTableRecord(irecord) => irecord,
+                        _ => unreachable!(),
+                    };
+
+                    let last_record = match last_record {
+                        DbRecord::InteriorTableRecord(irecord) => irecord,
+                        _ => unreachable!(),
+                    };
+
+                    if *first_row_id as u64 >= first_record.key {
+                        let db_page = self.load_table_at_page(first_record.left_child_page as u64);
+                        self.recurse_page_for_rows(db_page, table_key, rows, where_clause, row_ids);
+                        return;
+                    }
+
+                    if *first_row_id as u64 <= last_record.key {
+                        let db_page = self
+                            .load_table_at_page(cur_page.header.rightmost_pointer.unwrap() as u64);
+                        self.recurse_page_for_rows(db_page, table_key, rows, where_clause, row_ids);
+                        return;
+                    }
+                }
+
                 for record in cur_page.records.iter() {
                     match record {
                         DbRecord::InteriorTableRecord(irecord) => {
-                            if irecord.key >= table_key {
-                                let db_page =
-                                    self.load_table_at_page(irecord.left_child_page as u64);
-                                self.recurse_page_for_rows(db_page, table_key, rows);
+                            let db_page = self.load_table_at_page(irecord.left_child_page as u64);
+                            self.recurse_page_for_rows(
+                                db_page,
+                                table_key,
+                                rows,
+                                where_clause,
+                                row_ids,
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            PageType::LeafIndex => {
+                for record in cur_page.records.iter() {
+                    match record {
+                        DbRecord::IndexLeafRecord(ilrecord) => {
+                            let value = where_clause.unwrap().1;
+                            let ilrecord_value = &ilrecord.values[0];
+
+                            if ilrecord_value == value {
+                                rows.push((*record).clone());
                             }
                         }
                         _ => unreachable!(),
                     }
                 }
             }
-            PageType::LeafIndex => todo!(),
             PageType::LeafTable => {
                 for record in cur_page.records.iter() {
                     match record {
                         DbRecord::TableLeafRecord(trecord) => {
-                            rows.push((*trecord).clone());
+                            if look_for_row_ids {
+                                let row_ids = row_ids.as_mut().unwrap();
+
+                                if row_ids.contains(&(trecord.header.row_id as u32)) {
+                                    rows.push((*record).clone());
+                                    row_ids.retain(|id| id != &(trecord.header.row_id as u32));
+                                }
+                            } else {
+                                rows.push((*record).clone());
+                            }
                         }
                         _ => unreachable!(),
                     }
                 }
             }
         }
+    }
+
+    fn get_index_for_column_and_table(
+        &mut self,
+        table: &str,
+        column_name: &str,
+    ) -> Option<MasterPageRecord> {
+        self.master_page_records
+            .iter()
+            .find(|record| {
+                record.table_name == table
+                    && record.columns.contains(&column_name.to_string())
+                    && record.table_type == "index"
+            })
+            .cloned()
+    }
+
+    fn fetch_rows_from_index(
+        &mut self,
+        index_record: &MasterPageRecord,
+        value: &Value,
+    ) -> Vec<TableLeafRecord> {
+        // FIXME: There aren't just one column in an index
+        let column_index = index_record.get_column_index(&index_record.columns[0]);
+        let table_key = self
+            .get_table_record(&index_record.table_name)
+            .header
+            .row_id;
+        let cur_page = self.load_table_at_page(index_record.root_page as u64);
+
+        let where_clause = Some((column_index, value));
+
+        let mut rows = Vec::new();
+        self.recurse_page_for_rows(cur_page, table_key, &mut rows, where_clause, &mut None);
+
+        let row_ids = rows
+            .iter()
+            .map(|row| match row {
+                DbRecord::IndexLeafRecord(ilrecord) => {
+                    ilrecord.values[1].clone().try_into().unwrap()
+                }
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+
+        let table_to_fetch = self.get_table(&index_record.table_name).clone();
+        self.get_table_rows(&table_to_fetch, &mut Some(row_ids))
     }
 }
 
@@ -177,7 +341,7 @@ fn handle_dot_command(command: &str, args: &[String]) -> Result<()> {
             println!("number of tables: {}", master_page.header.cell_count);
 
             let table_names = master_page.records.iter().map(|record| {
-                let table = Table::parse(record);
+                let table = MasterPageRecord::parse(record);
                 table.name
             });
 
@@ -611,7 +775,7 @@ impl DbPage {
             PageType::LeafTable => Self::parse_leaf_table_page(reader, page_offset, header),
             PageType::LeafIndex => Self::parse_leaf_index_page(reader, page_offset, header),
             PageType::InteriorTable => Self::parse_interior_table_page(reader, page_offset, header),
-            _ => todo!("page type: {:?}", header.page_type),
+            PageType::InteriorIndex => Self::parse_interior_index_page(reader, page_offset, header),
         }
     }
 
@@ -669,9 +833,27 @@ impl DbPage {
         Self { header, records }
     }
 
+    fn parse_interior_index_page<B: Read + ByteReader + Seek>(
+        reader: &mut B,
+        page_offset: u64,
+        header: DbPageHeader,
+    ) -> Self {
+        let mut records = vec![];
+
+        for cell in &header.cells {
+            reader
+                .seek(SeekFrom::Start(page_offset + *cell as u64))
+                .unwrap();
+            let record = DbRecord::parse_index_interior_record(reader);
+            records.push(record);
+        }
+
+        Self { header, records }
+    }
+
     fn parse_master<B: Read + ByteReader + Seek>(reader: &mut B) -> Self {
         reader.seek(SeekFrom::Start(100)).unwrap();
-        let header = dbg!(DbPageHeader::parse(reader));
+        let header = DbPageHeader::parse(reader);
         let mut records = vec![];
 
         for cell in &header.cells {
@@ -684,18 +866,65 @@ impl DbPage {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 enum DbRecord {
     TableLeafRecord(TableLeafRecord),
     IndexLeafRecord(IndexLeafRecord),
     InteriorTableRecord(InteriorTableRecord),
+    InteriorIndexRecord(InteriorIndexRecord),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct IndexLeafRecord {
     length: u64,
     payload: Vec<u8>,
     oveflow: Option<u32>,
+    data_specification: DataSpecification,
+    values: Vec<Value>,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct InteriorIndexRecord {
+    left_child: u32,
+    length: u64,
+    key: Vec<u8>,
+    data_specification: DataSpecification,
+    values: Vec<Value>,
+}
+
+impl Record for InteriorIndexRecord {
+    fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let left_child = reader.read_u32();
+        let (length, _) = reader.read_varint();
+        let mut key = vec![0; length as usize];
+        reader.read_exact(&mut key).unwrap();
+
+        let mut key_reader = key.as_slice();
+
+        let (column_header_size, column_header_size_count) = key_reader.read_varint();
+
+        let data_specification = DataSpecification::parse(
+            &mut key_reader,
+            column_header_size as usize - column_header_size_count,
+        );
+
+        let values = data_specification
+            .types
+            .iter()
+            .map(|data_type| data_type.parse(&mut key_reader))
+            .collect();
+
+        Self {
+            left_child,
+            length,
+            key,
+            data_specification,
+            values,
+        }
+    }
 }
 
 impl Record for IndexLeafRecord {
@@ -703,12 +932,28 @@ impl Record for IndexLeafRecord {
         let (length, _) = reader.read_varint();
         let mut payload: Vec<u8> = vec![0; length as usize];
         reader.read_exact(&mut payload).unwrap();
-        let (overflow, _) = reader.read_varint();
+
+        let mut key_reader = payload.as_slice();
+
+        let (column_header_size, column_header_size_count) = key_reader.read_varint();
+
+        let data_specification = DataSpecification::parse(
+            &mut key_reader,
+            column_header_size as usize - column_header_size_count,
+        );
+
+        let values = data_specification
+            .types
+            .iter()
+            .map(|data_type| data_type.parse(&mut key_reader))
+            .collect();
 
         Self {
             length,
             payload,
             oveflow: None,
+            data_specification,
+            values,
         }
     }
 }
@@ -727,6 +972,11 @@ impl DbRecord {
     fn parse_table_index_record<R: Read + ByteReader>(reader: &mut R) -> Self {
         let record = InteriorTableRecord::parse(reader);
         Self::InteriorTableRecord(record)
+    }
+
+    fn parse_index_interior_record<R: Read + ByteReader>(reader: &mut R) -> Self {
+        let record = InteriorIndexRecord::parse(reader);
+        Self::InteriorIndexRecord(record)
     }
 }
 
@@ -756,6 +1006,17 @@ enum Value {
     Text(String),
     Blob(Vec<u8>),
     Null,
+}
+
+impl Value {
+    fn as_bytes(&self) -> Vec<u8> {
+        match self {
+            Value::Int(n) => n.to_be_bytes().to_vec(),
+            Value::Text(s) => s.as_bytes().to_vec(),
+            Value::Blob(b) => b.clone(),
+            Value::Null => vec![],
+        }
+    }
 }
 
 impl Display for Value {
@@ -838,43 +1099,6 @@ impl DataType {
             }
         }
     }
-
-    // TODO: account for differing specs of string encoding
-    fn parse_string<R: Read + ByteReader>(&self, reader: &mut R) -> String {
-        match self {
-            DataType::Blob(size) => {
-                let mut buf = vec![0; *size];
-                reader.read_exact(&mut buf).unwrap();
-                String::from_utf8(buf).unwrap()
-            }
-            DataType::Text(size) => {
-                let mut buf = vec![0; *size];
-                reader.read_exact(&mut buf).unwrap();
-                String::from_utf8(buf).unwrap()
-            }
-            _ => panic!("Invalid data type for string: {:?}", self),
-        }
-    }
-
-    fn parse_int<R: Read + ByteReader>(&self, reader: &mut R) -> i64 {
-        match self {
-            DataType::Int8 => reader.read_i8() as i64,
-            DataType::Int16 => reader.read_i16() as i64,
-            DataType::Int24 => {
-                let mut buf = [0; 3];
-                reader.read_exact(&mut buf).unwrap();
-                i32::from_be_bytes([0, buf[0], buf[1], buf[2]]) as i64
-            }
-            DataType::Int32 => reader.read_i32() as i64,
-            DataType::Int48 => {
-                let mut buf = [0; 6];
-                reader.read_exact(&mut buf).unwrap();
-                i64::from_be_bytes([0, 0, buf[0], buf[1], buf[2], buf[3], buf[4], buf[5]])
-            }
-            DataType::Int64 => reader.read_i64(),
-            _ => panic!("Invalid data type for int: {:?}", self),
-        }
-    }
 }
 
 impl From<u64> for DataType {
@@ -927,7 +1151,7 @@ impl DataSpecification {
         let mut payload_reader = payload_reader.as_slice();
 
         while !payload_reader.is_empty() {
-            let (data_type, data_type_size) = payload_reader.read_varint();
+            let (data_type, _) = payload_reader.read_varint();
             types.push(data_type.into());
         }
 
@@ -995,16 +1219,18 @@ impl Record for InteriorTableRecord {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
-struct Table {
+struct MasterPageRecord {
+    table_type: String,
     name: String,
+    table_name: String,
     root_page: u32,
     sql: String,
     columns: Vec<String>,
 }
 
-impl Table {
+impl MasterPageRecord {
     fn parse(record: &DbRecord) -> Self {
         let record = match record {
             DbRecord::TableLeafRecord(record) => record,
@@ -1012,16 +1238,17 @@ impl Table {
         };
 
         let table_type: String = record.values.get(0).unwrap().clone().try_into().unwrap();
-        assert!(table_type == "table");
         let name: String = record.values.get(1).unwrap().clone().try_into().unwrap();
         let table_name: String = record.values.get(2).unwrap().clone().try_into().unwrap();
         let root_page: u32 = record.values.get(3).unwrap().clone().try_into().unwrap();
         let sql: String = record.values.get(4).unwrap().clone().try_into().unwrap();
 
-        let columns = Table::analyse_sql_for_column_order(&sql);
+        let columns = MasterPageRecord::analyse_sql_for_column_order(&sql);
 
         Self {
+            table_type,
             name,
+            table_name,
             root_page,
             sql,
             columns,
@@ -1049,6 +1276,23 @@ impl Table {
                 })
                 .cloned()
                 .collect(),
+            parser::Ast::CreateIndex {
+                name: _,
+                table_name: _,
+                columns,
+            } => {
+                let mut columns = columns
+                    .iter()
+                    .map(|col| match col {
+                        parser::Ast::Identifier(name) => name,
+                        _ => panic!("Not implemented"),
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+
+                columns.sort();
+                columns
+            }
             _ => panic!("failed to parse sql from db file"),
         }
     }

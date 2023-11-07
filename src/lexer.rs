@@ -11,6 +11,8 @@ pub enum Token {
     Where,
     Not,
     Null,
+    Index,
+    On,
 
     // PUNCTUATION
     LParen,
@@ -159,6 +161,8 @@ impl Lexer {
                         "WHERE" => Token::Where,
                         "NOT" => Token::Not,
                         "NULL" => Token::Null,
+                        "INDEX" => Token::Index,
+                        "ON" => Token::On,
                         _ => Token::Identifier(identifier.to_ascii_uppercase()),
                     }
                 } else if current_char.is_whitespace() {
@@ -173,6 +177,7 @@ impl Lexer {
 }
 
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
@@ -334,6 +339,29 @@ mod tests {
             Token::Identifier("FIRST_APPEARANCE_YEAR".to_string()),
             Token::Identifier("TEXT".to_string()),
             Token::RParen,
+            Token::Eof,
+        ];
+
+        let tokens = lexer.lex();
+        assert_eq!(tokens, expected);
+    }
+
+    #[test]
+    fn create_index() {
+        let input =
+            "CREATE INDEX idx_superheroes_first_appeared ON superheroes (first_appearance);";
+        let mut lexer = Lexer::new(input.to_string());
+
+        let expected = [
+            Token::Create,
+            Token::Index,
+            Token::Identifier("IDX_SUPERHEROES_FIRST_APPEARED".to_string()),
+            Token::On,
+            Token::Identifier("SUPERHEROES".to_string()),
+            Token::LParen,
+            Token::Identifier("FIRST_APPEARANCE".to_string()),
+            Token::RParen,
+            Token::Semicolon,
             Token::Eof,
         ];
 
