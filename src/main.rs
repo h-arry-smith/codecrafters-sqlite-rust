@@ -95,7 +95,6 @@ impl Db {
     }
 
     fn load_table(&mut self, table: &Table) -> DbPage {
-        eprintln!("### TRYING TO LOAD TABLE {} ###", table.name);
         let offset = dbg!((table.root_page as u64 - 1) * self.header.page_size as u64);
         DbPage::parse(&mut self.file, offset)
     }
@@ -113,7 +112,6 @@ impl Db {
 
         let mut rows = Vec::new();
         self.recurse_page_for_rows(db_page, table_key, &mut rows);
-        eprintln!("Found {} rows", rows.len());
         rows
     }
 
@@ -123,7 +121,6 @@ impl Db {
         table_key: u64,
         rows: &mut Vec<TableLeafRecord>,
     ) {
-        eprintln!("### RECURSING A {:?} ###", cur_page.header.page_type);
         match cur_page.header.page_type {
             PageType::InteriorIndex => todo!(),
             PageType::InteriorTable => {
@@ -142,10 +139,6 @@ impl Db {
             }
             PageType::LeafIndex => todo!(),
             PageType::LeafTable => {
-                eprintln!(
-                    "### ADDING {} ROWS TO THE COLLECTION ###",
-                    cur_page.records.len()
-                );
                 for record in cur_page.records.iter() {
                     match record {
                         DbRecord::TableLeafRecord(trecord) => {
@@ -176,7 +169,6 @@ fn handle_dot_command(command: &str, args: &[String]) -> Result<()> {
 
     match command {
         "dbinfo" => {
-            eprintln!("version: {:x}", header.sqlite_version_number);
             println!("database page size: {}", header.page_size);
 
             println!("number of tables: {}", master_page.header.cell_count);
@@ -560,26 +552,21 @@ impl DbPageHeader {
         //      0x0d leaf table b-tree page.
         // Any other value for the b-tree page type is an error.
         let flag = reader.read_u8();
-        eprintln!("flag: {:x}", flag);
         let page_type = flag.into();
 
         // The two-byte integer at offset 1 gives the start of the first freeblock on the page, or
         // is zero if there are no freeblocks.
         let first_freeblock = reader.read_u16();
-        eprintln!("first_freeblock: {:x}", first_freeblock);
 
         // The two-byte integer at offset 3 gives the number of cells on the page.
         let cell_count = reader.read_u16();
-        eprintln!("cell_count: {:x}", cell_count);
 
         // The two-byte integer at offset 5 gives the start of the cell content area within the page.
         let cell_content_area_offset = reader.read_u16();
-        eprintln!("cell_content_area_offset: {:x}", cell_content_area_offset);
 
         // The one-byte integer at offset 7 gives the number of fragmented free bytes within the cell
         // content area at the end of the page.
         let fragmented_free_bytes = reader.read_u8();
-        eprintln!("fragmented_free_bytes: {:x}", fragmented_free_bytes);
 
         // The four-byte integer at offset 8 gives the page number of the right-most page in the tree
         // that is the parent of this page. If this is a root page, then the value is zero.
@@ -621,18 +608,9 @@ impl DbPage {
         let header = DbPageHeader::parse(reader);
 
         match header.page_type {
-            PageType::LeafTable => {
-                eprintln!("leaf table");
-                Self::parse_leaf_table_page(reader, page_offset, header)
-            }
-            PageType::LeafIndex => {
-                eprintln!("leaf index");
-                Self::parse_leaf_index_page(reader, page_offset, header)
-            }
-            PageType::InteriorTable => {
-                eprintln!("interior table");
-                Self::parse_interior_table_page(reader, page_offset, header)
-            }
+            PageType::LeafTable => Self::parse_leaf_table_page(reader, page_offset, header),
+            PageType::LeafIndex => Self::parse_leaf_index_page(reader, page_offset, header),
+            PageType::InteriorTable => Self::parse_interior_table_page(reader, page_offset, header),
             _ => todo!("page type: {:?}", header.page_type),
         }
     }
@@ -723,11 +701,9 @@ struct IndexLeafRecord {
 impl Record for IndexLeafRecord {
     fn parse<R: Read + ByteReader>(reader: &mut R) -> Self {
         let (length, _) = reader.read_varint();
-        eprintln!("length: {:x}", length);
         let mut payload: Vec<u8> = vec![0; length as usize];
         reader.read_exact(&mut payload).unwrap();
         let (overflow, _) = reader.read_varint();
-        eprintln!("overflow: {:x}", overflow);
 
         Self {
             length,
@@ -1036,16 +1012,11 @@ impl Table {
         };
 
         let table_type: String = record.values.get(0).unwrap().clone().try_into().unwrap();
-        eprintln!("table_type: {}", table_type);
         assert!(table_type == "table");
         let name: String = record.values.get(1).unwrap().clone().try_into().unwrap();
-        eprintln!("name: {}", name);
         let table_name: String = record.values.get(2).unwrap().clone().try_into().unwrap();
-        eprintln!("table_name: {}", table_name);
         let root_page: u32 = record.values.get(3).unwrap().clone().try_into().unwrap();
-        eprintln!("root_page: {}", root_page);
         let sql: String = record.values.get(4).unwrap().clone().try_into().unwrap();
-        eprintln!("sql: {}", sql);
 
         let columns = Table::analyse_sql_for_column_order(&sql);
 
@@ -1083,7 +1054,6 @@ impl Table {
     }
 
     fn get_column_index(&self, column_name: &str) -> usize {
-        eprintln!("trying to find {} in {:?}", column_name, self.columns);
         self.columns
             .iter()
             .position(|col| col == column_name)

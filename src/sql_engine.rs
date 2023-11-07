@@ -66,7 +66,6 @@ impl QueryPlanner {
                             .iter()
                             .map(|col_name| {
                                 if col_name == "ID" {
-                                    eprintln!("id mapping col index to -1");
                                     -1
                                 } else {
                                     table.get_column_index(col_name) as isize
@@ -81,7 +80,6 @@ impl QueryPlanner {
                         let mut table_results = Vec::new();
                         for index in &col_indexes {
                             if index == &-1 {
-                                eprintln!("col index is -1 returning id");
                                 table_results.push(Value::Int(record.header.row_id as i64));
                                 continue;
                             }
